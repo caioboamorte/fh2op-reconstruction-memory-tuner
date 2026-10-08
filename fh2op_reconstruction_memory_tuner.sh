@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-# Ajusta com seguranca a memoria das tarefas de reconstrucao 2D e 3D
-# do DJI FlightHub 2 On-Premises.
+# Ajusta com seguranca a memoria das tarefas de reconstrucao 2D, 3D
+# e Panorama Stitch (com ou sem o prefixo pf-terra) do DJI FlightHub 2 On-Premises.
 #
 # Uso:
 #   sudo ./fh2op_reconstruction_memory_tuner.sh
@@ -15,7 +15,8 @@ set -Eeuo pipefail
 
 readonly SCRIPT_NAME="${0##*/}"
 readonly CONTAINERS=(ts-admin ts-scheduler)
-readonly TASK_PATTERN='^fh2-pri-aec-reconstruction-(2d|3d)'
+# Regex cobrindo aec-reconstruction-2d, 3d, pano-stitch e pf-terra-pano-stitch
+readonly TASK_PATTERN='^fh2-pri-(aec-reconstruction-(2d|3d)|(pf-terra-)?pano-stitch)'
 
 TASKS_FILE=""
 SKIP_RESTART=false
@@ -65,8 +66,11 @@ Opcoes:
 O script:
 
   1. Localiza o task-scheduler-tasks.json
-  2. Identifica tarefas fh2-pri-aec-reconstruction-2d*
-     e fh2-pri-aec-reconstruction-3d*
+  2. Identifica tarefas:
+     - fh2-pri-aec-reconstruction-2d*
+     - fh2-pri-aec-reconstruction-3d*
+     - fh2-pri-pano-stitch*
+     - fh2-pri-pf-terra-pano-stitch*
   3. Solicita a nova quantidade de RAM
   4. Mostra as alteracoes antes de aplicar
   5. Cria backup automatico
@@ -185,9 +189,7 @@ choose_tasks_file() {
     return 0
   fi
 
-  #
   # 1. Tenta descobrir pelo bind mount dos containers
-  #
   for source in "${CONTAINERS[@]}"; do
     found="$(discover_from_container "$source")"
 
@@ -196,18 +198,14 @@ choose_tasks_file() {
     done <<< "$found"
   done
 
-  #
   # 2. Caminhos conhecidos do FH2 OP
-  #
   add_candidate \
     "/fhop-install/install/conf/self-service/task-scheduler/task-scheduler-tasks.json"
 
   add_candidate \
     "/fhop-install/install/conf/middleware-service/task-scheduler/task-scheduler-tasks.json"
 
-  #
   # 3. Procura dentro de /fhop-install
-  #
   if [[ -d /fhop-install ]]; then
     while IFS= read -r found; do
       add_candidate "$found"
@@ -220,9 +218,7 @@ choose_tasks_file() {
     )
   fi
 
-  #
   # 4. Procura em alguns caminhos comuns adicionais
-  #
   for source in \
     /data \
     /dados \
@@ -243,9 +239,7 @@ choose_tasks_file() {
     )
   done
 
-  #
   # Nenhum arquivo encontrado
-  #
   if ((${#CANDIDATES[@]} == 0)); then
     warn "O arquivo nao foi localizado automaticamente."
 
@@ -264,9 +258,7 @@ choose_tasks_file() {
     return 0
   fi
 
-  #
   # Um ou mais arquivos encontrados
-  #
   printf '\nArquivos encontrados:\n'
 
   for selection in "${!CANDIDATES[@]}"; do
@@ -312,7 +304,7 @@ choose_memory() {
 
   while true; do
     read -r -p \
-      "Informe a nova memoria em GiB (ex.: 20, 24 ou 28): " \
+      "Informe a nova memoria em GiB (ex.: 20, 24, 32 ou 64): " \
       input
 
     input="${input//[[:space:]]/}"
@@ -356,12 +348,7 @@ restore_backup() {
     "$TASKS_FILE"
 }
 
-#
-# ============================================================
 # Inicio da execucao
-# ============================================================
-#
-
 choose_tasks_file
 
 validate_tasks_file "$TASKS_FILE" \
@@ -384,7 +371,7 @@ MATCH_COUNT="$(
 )"
 
 ((MATCH_COUNT > 0)) \
-  || die "Nenhuma tarefa de mapeamento 2D ou 3D foi encontrada."
+  || die "Nenhuma tarefa de reconstrucao ou panorama foi encontrada."
 
 printf '\nArquivo selecionado:\n'
 printf '  %s\n' "$TASKS_FILE"
@@ -450,9 +437,7 @@ run_root jq \
   ' "$TASKS_FILE" \
   | run_root tee "$TEMP_FILE" >/dev/null
 
-#
 # Valida o arquivo temporario
-#
 run_root jq -e \
   --arg pattern "$TASK_PATTERN" \
   --arg memory "$NEW_MEMORY" \
@@ -546,11 +531,8 @@ read -r -p \
 [[ "$CONFIRMATION" == "APLICAR" ]] \
   || die "Operacao cancelada; nenhum arquivo foi alterado."
 
-#
 # Backup
-#
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
-
 BACKUP_FILE="${TASKS_FILE}.backup-${TIMESTAMP}"
 
 run_root cp -a -- \
@@ -559,9 +541,7 @@ run_root cp -a -- \
 
 ok "Backup criado: $BACKUP_FILE"
 
-#
 # Mantem permissoes e ownership do original
-#
 run_root chmod \
   --reference="$TASKS_FILE" \
   "$TEMP_FILE"
@@ -570,18 +550,14 @@ run_root chown \
   --reference="$TASKS_FILE" \
   "$TEMP_FILE"
 
-#
 # Substitui atomically
-#
 run_root mv -- \
   "$TEMP_FILE" \
   "$TASKS_FILE"
 
 TEMP_FILE=""
 
-#
 # Validacao apos gravacao
-#
 POST_INVALID_COUNT="$(
   run_root jq \
     --arg pattern "$TASK_PATTERN" \
@@ -611,11 +587,9 @@ then
     "A validacao apos a gravacao falhou. O arquivo original foi restaurado."
 fi
 
-ok "$MATCH_COUNT tarefa(s) de mapeamento validadas com memory=$NEW_MEMORY"
+ok "$MATCH_COUNT tarefa(s) validadas com memory=$NEW_MEMORY"
 
-#
 # Reinicia containers
-#
 declare -a RESTARTED=()
 
 if [[ "$SKIP_RESTART" == false ]]; then
@@ -651,9 +625,7 @@ if [[ "$SKIP_RESTART" == false ]]; then
   fi
 fi
 
-#
 # Confirma configuracao lida pelos containers
-#
 for container in "${RESTARTED[@]:-}"; do
 
   if run_root docker exec \
@@ -716,9 +688,7 @@ for container in "${RESTARTED[@]:-}"; do
 
 done
 
-#
 # Resultado final
-#
 printf '\nResultado final:\n'
 
 run_root jq \
@@ -742,15 +712,13 @@ run_root jq \
 printf '\nBackup para rollback:\n'
 printf '  %s\n' "$BACKUP_FILE"
 
-printf '\nA alteracao vale para todos os novos mapeamentos 2D e 3D que usarem essas definicoes.\n'
+printf '\nA alteracao vale para todos os novos processamentos que usarem essas definicoes.\n'
 printf 'Um Job/Pod ja criado mantem a configuracao anterior.\n'
 
-#
-# Mostra pods relacionados a reconstrucao
-#
+# Mostra pods relacionados
 if command -v k3s >/dev/null 2>&1; then
 
-  printf '\nPods de reconstrucao encontrados no k3s:\n'
+  printf '\nPods de processamento encontrados no k3s:\n'
 
   run_root k3s kubectl get pods \
     -A \
@@ -758,7 +726,7 @@ if command -v k3s >/dev/null 2>&1; then
     2>/dev/null \
   | awk '
       NR == 1 ||
-      tolower($0) ~ /reconstruction|terra|aec/
+      tolower($0) ~ /reconstruction|terra|aec|pano|stitch/
     ' \
   || true
 
